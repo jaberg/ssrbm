@@ -5,8 +5,8 @@ logger.setLevel(logging.INFO)
 import numpy
 import theano
 from theano import shared, tensor
-import pylearn.io.image_tiling
-from tlinear import dot, dot_outshape
+from utils import tile_slices_to_image
+from theano_linear import dot
 
 try:
     # download this from https://bitbucket.org/jaberg/theano-curand
@@ -257,7 +257,7 @@ class Gibbs(object):
                 particles = particles.transpose(0,2,3,1) #put colour last
             else:
                 raise NotImplementedError()
-        return pylearn.io.image_tiling.tile_slices_to_image(
+        return tile_slices_to_image(
                     particles,
                     scale_each=scale_each,
                     **kwargs)

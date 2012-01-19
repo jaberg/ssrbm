@@ -14,11 +14,24 @@ import numpy
 import theano
 from theano import function, tensor, shared
 
-import tlinear
+import skdata.cifar10
+import theano_linear
 
 from utils import sharedX, floatX
-from utils import get_symbolic_data
 import rbm
+
+
+def preprocess(batch_x, dct, x_shape):
+    if dct['kind'] == 'RAW':
+        visible_pos_phase = batch_x
+    elif dct['kind'] == 'GCN':
+        x2 = tensor.cast(batch_x.flatten(2), 'float32')
+        x2c = x2 - x2.mean(axis=1).dimshuffle(0,'x')
+        x2lcn = x2c / tensor.sqrt((10 + (x2c**2).mean(axis=1).dimshuffle(0,'x')))
+        visible_pos_phase = x2lcn.reshape(x_shape)
+    else:
+        raise NotImplementedError(dct['kind'])
+    return visible_pos_phase
 
 
 class TrialObject(object):
@@ -28,38 +41,34 @@ class TrialObject(object):
         batchsize = conf['batchsize']
         rng = numpy.random.RandomState(conf['seed'])
 
-        self.batch_idx = batch_idx = tensor.iscalar()
+        batch_x = tensor.ftensor4()
+        # assume it's (images, rows, columns, channels)
 
-        visible_pos_phase, batch_y, batch_x = get_symbolic_data(conf['dataset'],
-                self.batch_idx,
-                batchsize,
-                split='train',
-                loop=True,
-                preprocessing = conf['preprocessing'],
-                LCN_width = conf['LCN_width'])
+        visible_pos_phase = preprocess(batch_x, conf['preprocessing'],
+                x_shape = (batchsize, 32, 32, 3))
 
         filter_shape = conf['filter_shape']
         n_filters = conf['n_filters']
         W = filters = global_weights = None
         if 1: #always allocate W
             if conf['n_filters']:
-                filters = linear.LConv(
+                filters = theano_linear.LConv(
                         filters=sharedX(rng.randn(*((n_filters,3,)+filter_shape)) *
                             conf['filters_irange'] , 'filters'),
                         img_shape=(batchsize,3,32,32))
             W = filters
             if conf['n_global_weights']:
-                global_weights = linear.MatrixMul(
+                global_weights = theano_linear.MatrixMul(
                         W=sharedX(rng.randn(32*32*3, conf['n_global_weights']) * conf['global_weights_irange'],
                             'global_weights'),
                         row_shape=(3,32,32))
-            W = linear.LConcat([global_weights, W]) if W else global_weights
+            W = theano_linear.LConcat([global_weights, W]) if W else global_weights
 
         Lambda = Lambda_filters = Lambda_weights = None
         if conf['Lambda_enabled']: # Allocate Lambda_weights, Lambda_filters
             if conf['n_filters']:
                 if conf['Lambda_filters_logdomain']: raise NotImplementedError()
-                Lambda = Lambda_filters = linear.LConv(
+                Lambda = Lambda_filters = theano_linear.LConv(
                         filters=sharedX(
                             numpy.add(
                                 numpy.zeros(((n_filters,3,)+filter_shape)),
@@ -68,15 +77,16 @@ class TrialObject(object):
                         img_shape=(batchsize,3,32,32))
             if conf['n_global_weights']:
                 if conf['Lambda_weights_logdomain']: raise NotImplementedError()
-                Lambda_weights = linear.MatrixMul(
+                Lambda_weights = theano_linear.MatrixMul(
                         W=sharedX(
                             numpy.add(
                                 numpy.zeros((3*32*32, conf['n_global_weights'])),
                                 conf['Lambda_weights0']),
                             'Lambda_weights'),
                         row_shape=(3,32,32))
-            Lambda = linear.LConcat([Lambda_weights, Lambda]) if Lambda else Lambda_weights
+            Lambda = theano_linear.LConcat([Lambda_weights, Lambda]) if Lambda else Lambda_weights
 
+        assert 0
         rbm = template.RBM(conf, rng, W, Lambda=Lambda)
 
         sampler = template.Gibbs(rbm,
@@ -225,10 +235,14 @@ def conf_init(conf):
 
 
 def do_lcn(conf):
-    conf['preprocessing'] = 'LCN'
-    conf["LCN_width"] = 9
+    conf['preprocessing'] = dict(
+            kind='LCN',
+            width=9)
     return conf
 
+def do_gcn(conf):
+    conf['preprocessing'] = dict(kind='GCN')
+    return conf
 
 def with_Lambda(conf):
     conf.update(dict(
@@ -261,14 +275,18 @@ def conf_print(dct):
 
 
 # Call like this:
+# python imgdemo.py main_train
 # ~/cvs/Pycall/bin/pycall 'ssrbm.Tssrbm.kriz.main("do_lcn", dataset="cifar10", base_lr_per_example=3e-4)'
-def main(*conf_initializers, **kwargs):
+def main_train():
     conf = conf_init(dict())
-    initializers = [globals()[ci] for ci in conf_initializers]
-    for init in initializers:
-        conf = init(conf)
-    conf.update(kwargs)
+
+    # TODO: for initializer in initializers: conf = initializer(conf)
+    conf = do_gcn(conf)
+    #conf = with_Lambda(conf)
+    #conf = with_momentum(conf)
+
     conf_print(conf)
+
     trial = TrialObject(conf)
     loop = UnsupervisedTraining(trial)
     trial.save('model_%06i.pkl'%loop.i)
@@ -334,3 +352,7 @@ def main_sample(trial_filename):
         print burnin
         sampler.tile_particles(scale_each=False).save(
                 '%s_sample_%06i_c.png'%(trial_filename[:-4],burnin))
+
+if __name__ == '__main__':
+    main = globals()[sys.argv[1]]
+    sys.exit(main(*sys.argv[2:]))
